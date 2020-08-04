@@ -12,7 +12,7 @@ URL_FORMAT = "{base_url}/{platform}/{dist_name}.tar.bz2"
 @timed("Solving conda envrionment")
 def conda_solve():
     """Performs the conda solve and splits the deps from the package."""
-    cmd = ["conda", "create", "--dry-run", "--json",
+    cmd = ["conda", "create", "--yes", "--dry-run", "--json",
            "--name", "__pytorch__", "-c", "pytorch-nightly", "pytorch"]
     p = subprocess.run(cmd, capture_output=True, check=True)
     solve = json.loads(p.stdout)
@@ -30,14 +30,18 @@ def conda_solve():
 @timed("Installing dependencies")
 def deps_install(deps):
     """Install dependencies to deps environment"""
-    cmd = ["conda", "create", "--no-deps", "--name", "pytorch-deps"] + deps
+    # first remove previous env
+    cmd = ["conda", "env", "remove", "--yes", "--name", "pytorch-deps"]
+    p = subprocess.run(cmd, check=True)
+    # install new deps
+    cmd = ["conda", "create", "--yes", "--no-deps", "--name", "pytorch-deps"] + deps
     p = subprocess.run(cmd, check=True)
 
 
 @timed("Installing pytorch nightly binaries")
 def pytorch_install(url):
     """"Install pytorch into the PWD"""
-    cmd = ["conda", "create", "--no-deps", "--prefix", ".", url]
+    cmd = ["conda", "create", "--yes", "--no-deps", "--prefix", ".", url]
     p = subprocess.run(cmd, check=True)
 
 

@@ -28,9 +28,10 @@ def conda_solve():
         url = URL_FORMAT.format(**pkg)
         if pkg["name"] == "pytorch":
             pytorch = url
+            platform = pkg["platform"]
         else:
             deps.append(url)
-    return deps, pytorch
+    return deps, pytorch, platform
 
 
 @timed("Installing dependencies")
@@ -87,10 +88,31 @@ def checkout_nightly_version(spdir):
     p = subprocess.run(cmd, check=True)
 
 
+def _get_listing(source_dir, platform):
+    system = platform.system()
+    if platform.startswith("linux"):
+        listing = _get_listing_linux(source_dir)
+    elif platform.startswith("osx"):
+        listing = _get_listing_osx(source_dir)
+    elif platform.startswith("win"):
+        listing = _get_listing_win(source_dir)
+    else:
+        raise RuntimeError(f"Platform {platform!r} not recognized")
+
+
+@timed("Moving nightly files into repo")
+def move_nightly_files(spdir, platform):
+    source_dir = os.path.join(spdir, "torch")
+    listing = _get_listing(source_dir, platform)
+    target_dir = os.path.abspath("torch")
+
+
 def install():
     """Development install of PyTorch"""
-    deps, pytorch = conda_solve()
+    deps, pytorch, platform = conda_solve()
     deps_install(deps)
     pytdir = pytorch_install(pytorch)
     spdir = _site_packages(pytdir)
     checkout_nightly_version(spdir)
+    move_nightly_files(spdir, platform)
+    pytdir.cleanup()

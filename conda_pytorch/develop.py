@@ -3,6 +3,7 @@ import os
 import re
 import json
 import glob
+import shutil
 import tempfile
 import subprocess
 from ast import literal_eval
@@ -88,8 +89,15 @@ def checkout_nightly_version(spdir):
     p = subprocess.run(cmd, check=True)
 
 
+def _get_listing_linux(source_dir):
+    listing = glob.glob(os.path.join(source_dir, "*.so"))
+    listing.append(os.path.join(source_dir, "version.py"))
+    listing.extend(glob.glob(os.path.join(source_dir, "lib", "*.so")))
+    listing.append(os.path.join(source_dir, "bin"))
+    return listing
+
+
 def _get_listing(source_dir, platform):
-    system = platform.system()
     if platform.startswith("linux"):
         listing = _get_listing_linux(source_dir)
     elif platform.startswith("osx"):
@@ -98,13 +106,50 @@ def _get_listing(source_dir, platform):
         listing = _get_listing_win(source_dir)
     else:
         raise RuntimeError(f"Platform {platform!r} not recognized")
+    return listing
+
+
+def _link_files(listing, target_dir):
+    for src in listing:
+        is_dir = os.path.isdir(src)
+        base = os.path.basename(src)
+        trg = os.path.join(target_dir, base)
+        # remove existing files
+        if os.path.exists(trg):
+            if is_dir:
+                shutil.rmtree(trg)
+            else:
+                os.remove(trg)
+        # link in new files
+        if is_dir:
+            os.makedirs(trg, exist_ok=True)
+            for root, dirs, files in os.walk(src):
+                relroot = root[len(src):]
+                for name in files:
+                    relname = os.path.join(relroot, name)
+                    s = os.path.join(src, relname)
+                    t = os.path.join(trg, relname)
+                    print(f"Linking {s} -> {t}")
+                    os.link(s, t)
+                for name in dirs:
+                    relname = os.path.join(relroot, name)
+                    os.makedirs(os.path.join(trg, relname), exist_ok=True)
+        else:
+            print(f"Linking {src} -> {trg}")
+            os.link(src, trg)
 
 
 @timed("Moving nightly files into repo")
 def move_nightly_files(spdir, platform):
+    # get file listing
     source_dir = os.path.join(spdir, "torch")
     listing = _get_listing(source_dir, platform)
     target_dir = os.path.abspath("torch")
+    # copy / link files
+    if platform.startswith("win"):
+        _copy_files(listing, target_dir)
+    else:
+        _link_files(listing, target_dir)
 
 
 def install():
@@ -116,3 +161,5 @@ def install():
     checkout_nightly_version(spdir)
     move_nightly_files(spdir, platform)
     pytdir.cleanup()
+    print("-------\nPytorch Development Environment set up!\nPlease activate to "
+          "enable this environment:\n  $ conda activate pytorch-deps")

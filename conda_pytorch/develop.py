@@ -13,7 +13,6 @@ from .tools import timed
 
 URL_FORMAT = "{base_url}/{platform}/{dist_name}.tar.bz2"
 SHA1_RE = re.compile("([0-9a-fA-F]{40})")
-#GIT_VERSION_RE = re.compile(r"git_version\s*=\s*['\"]([0-9a-fA-F]+)['\"]")
 
 
 @timed("Solving conda envrionment")
@@ -55,10 +54,25 @@ def pytorch_install(url):
     return pytdir
 
 
-def _site_packages(pytdir):
-    template = os.path.join(pytdir.name, "lib", "python*.*", "site-packages")
-    spdir = glob.glob(template)[0]
+def _site_packages(pytdir, platform):
+    if platform.startswith("win"):
+        os.path.join(pytdir.name, "Lib", "site-packages")
+    else:
+        template = os.path.join(pytdir.name, "lib", "python*.*", "site-packages")
+        spdir = glob.glob(template)[0]
     return spdir
+
+
+def _ensure_commit(git_sha1):
+    """Make sure that we actually have the commit locally"""
+    cmd = ["git", "cat-file", "-e", git_sha1 + "^{commit}"]
+    p = subprocess.run(cmd, capture_output=True, check=False)
+    if p.returncode == 0:
+        # we have the commit locally
+        return
+    # we don't have the commit, must fetch
+    cmd = ["git", "fetch", "https://github.com/pytorch/pytorch.git", git_sha1]
+    p = subprocess.run(cmd, check=True)
 
 
 @timed("Checking out nightly PyTorch")
@@ -77,6 +91,7 @@ def checkout_nightly_version(spdir):
         raise RuntimeError(f"Could not find git_version in {version_fname}")
     print(f"Found released git version {git_version}")
     # now cross refernce with nightly version
+    _ensure_commit(git_version)
     cmd = ["git", "show", "--no-patch", "--format=%s", git_version]
     p = subprocess.run(cmd, capture_output=True, check=True, text=True)
     m = SHA1_RE.search(p.stdout)
@@ -85,6 +100,7 @@ def checkout_nightly_version(spdir):
     nightly_version = m.group(1)
     print(f"Found nightly release version {nightly_version}")
     # now checkout nightly version
+    _ensure_commit(nightly_version)
     cmd = ["git", "checkout", nightly_version]
     p = subprocess.run(cmd, check=True)
 
@@ -93,6 +109,24 @@ def _get_listing_linux(source_dir):
     listing = glob.glob(os.path.join(source_dir, "*.so"))
     listing.append(os.path.join(source_dir, "version.py"))
     listing.extend(glob.glob(os.path.join(source_dir, "lib", "*.so")))
+    listing.append(os.path.join(source_dir, "bin"))
+    return listing
+
+
+def _get_listing_osx(source_dir):
+    # oddly, these are .so files even on Mac
+    listing = glob.glob(os.path.join(source_dir, "*.so"))
+    listing.append(os.path.join(source_dir, "version.py"))
+    listing.extend(glob.glob(os.path.join(source_dir, "lib", "*.dylib")))
+    listing.append(os.path.join(source_dir, "bin"))
+    return listing
+
+
+def _get_listing_win(source_dir):
+    listing = glob.glob(os.path.join(source_dir, "*.pyd"))
+    listing.append(os.path.join(source_dir, "version.py"))
+    listing.extend(glob.glob(os.path.join(source_dir, "lib", "*.lib")))
+    listing.extend(glob.glob(os.path.join(source_dir, "lib", "*.dll")))
     listing.append(os.path.join(source_dir, "bin"))
     return listing
 
@@ -109,38 +143,50 @@ def _get_listing(source_dir, platform):
     return listing
 
 
+def _remove_existing(trg, is_dir):
+    if os.path.exists(trg):
+        if is_dir:
+            shutil.rmtree(trg)
+        else:
+            os.remove(trg)
+
+def _move_single(src, target_dir, mover, verb):
+    is_dir = os.path.isdir(src)
+    base = os.path.basename(src)
+    trg = os.path.join(target_dir, base)
+    _remove_existing(trg, is_dir)
+    # move over new files
+    if is_dir:
+        os.makedirs(trg, exist_ok=True)
+        for root, dirs, files in os.walk(src):
+            relroot = root[len(src):]
+            for name in files:
+                relname = os.path.join(relroot, name)
+                s = os.path.join(src, relname)
+                t = os.path.join(trg, relname)
+                print(f"{verb} {s} -> {t}")
+                mover(s, t)
+            for name in dirs:
+                relname = os.path.join(relroot, name)
+                os.makedirs(os.path.join(trg, relname), exist_ok=True)
+    else:
+        print(f"{verb} {src} -> {trg}")
+        mover(src, trg)
+
+
+def _copy_files(listing, target_dir):
+    for src in listing:
+        _move_single(src, target_dir, shutil.copy2, "Copying")
+
+
 def _link_files(listing, target_dir):
     for src in listing:
-        is_dir = os.path.isdir(src)
-        base = os.path.basename(src)
-        trg = os.path.join(target_dir, base)
-        # remove existing files
-        if os.path.exists(trg):
-            if is_dir:
-                shutil.rmtree(trg)
-            else:
-                os.remove(trg)
-        # link in new files
-        if is_dir:
-            os.makedirs(trg, exist_ok=True)
-            for root, dirs, files in os.walk(src):
-                relroot = root[len(src):]
-                for name in files:
-                    relname = os.path.join(relroot, name)
-                    s = os.path.join(src, relname)
-                    t = os.path.join(trg, relname)
-                    print(f"Linking {s} -> {t}")
-                    os.link(s, t)
-                for name in dirs:
-                    relname = os.path.join(relroot, name)
-                    os.makedirs(os.path.join(trg, relname), exist_ok=True)
-        else:
-            print(f"Linking {src} -> {trg}")
-            os.link(src, trg)
+        _move_single(src, target_dir, os.link, "Linking")
 
 
 @timed("Moving nightly files into repo")
 def move_nightly_files(spdir, platform):
+    """Moves PyTorch files from temporary installed location to repo."""
     # get file listing
     source_dir = os.path.join(spdir, "torch")
     listing = _get_listing(source_dir, platform)
@@ -157,9 +203,13 @@ def install():
     deps, pytorch, platform = conda_solve()
     deps_install(deps)
     pytdir = pytorch_install(pytorch)
-    spdir = _site_packages(pytdir)
+    spdir = _site_packages(pytdir, platform)
     checkout_nightly_version(spdir)
     move_nightly_files(spdir, platform)
     pytdir.cleanup()
-    print("-------\nPytorch Development Environment set up!\nPlease activate to "
+    print("-------\nPyTorch Development Environment set up!\nPlease activate to "
           "enable this environment:\n  $ conda activate pytorch-deps")
+
+
+if __name__ == "__main__":
+    install()

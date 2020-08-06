@@ -183,6 +183,10 @@ def _link_files(listing, target_dir):
     for src in listing:
         _move_single(src, target_dir, os.link, "Linking")
 
+def _mount_points_differ(dir0, dir1):
+    dir0_dev = os.stat(dir0).st_dev
+    dir1_dev = os.stat(dir1).st_dev
+    return dir0_dev != dir1_dev
 
 @timed("Moving nightly files into repo")
 def move_nightly_files(spdir, platform):
@@ -192,7 +196,7 @@ def move_nightly_files(spdir, platform):
     listing = _get_listing(source_dir, platform)
     target_dir = os.path.abspath("torch")
     # copy / link files
-    if platform.startswith("win"):
+    if platform.startswith("win") or _mount_points_differ(source_dir, target_dir):
         _copy_files(listing, target_dir)
     else:
         _link_files(listing, target_dir)
